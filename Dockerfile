@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies (build + TA-Lib deps + cleanup)
+# Install system dependencies (build tools + TA-Lib deps)
 RUN apt-get update && apt-get install -y \
     build-essential \
     wget \
@@ -17,7 +17,6 @@ RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     make \
-    libatlas-base-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Download and install TA-Lib C library
