@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-RPD Alert Bot - Background Worker for Render.com
+RPD Alert Bot - Web Service for Render.com
 A cloud-based trading alert bot using RPD (Reversal Point Detection) algorithm
 """
 
@@ -15,8 +15,10 @@ import logging
 import os
 import signal
 import sys
+import threading
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, Dict, Any
+from flask import Flask, jsonify, request
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -37,6 +39,9 @@ class Config:
     # Required environment variables
     TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
     TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+    
+    # Web service configuration
+    PORT = int(os.getenv('PORT', '10000'))  # Render uses PORT env var
     
     # Configuration methods
     CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', '300'))  # 5 minutes
@@ -439,7 +444,7 @@ class MarketData:
                 return None
 
 class RPDAlertBot:
-    """Main RPD Alert Bot for Background Worker"""
+    """Main RPD Alert Bot with Web Service"""
     
     def __init__(self, trading_config):
         self.rpd = RPDIndicator()
@@ -448,6 +453,11 @@ class RPDAlertBot:
         self.last_alerts = {}
         self.running = False
         self.last_health_check = datetime.now()
+        self.stats = {
+            'total_scans': 0,
+            'alerts_sent': 0,
+            'uptime_start': datetime.now()
+        }
         
     def should_send_alert(self, symbol, signal_type):
         """Prevent spam alerts"""
@@ -524,6 +534,7 @@ class RPDAlertBot:
                 
                 if self.telegram.send_message(message):
                     logger.info(f"Alert sent: {symbol}({timeframe}) {result['signal']} ({result['probability']:.1f}%)")
+                    self.stats['alerts_sent'] += 1
                     return result
                 else:
                     logger.error(f"Failed to send alert for {symbol}")
@@ -551,6 +562,7 @@ class RPDAlertBot:
                 errors += 1
                 continue
         
+        self.stats['total_scans'] += 1
         logger.info(f"Multi-timeframe scan complete. Alerts sent: {alerts_sent}, Errors: {errors}")
         return alerts_sent
     
@@ -570,63 +582,48 @@ class RPDAlertBot:
             for timeframe, symbols in timeframe_groups.items():
                 config_summary.append(f"• {timeframe}: {', '.join(symbols)}")
             
+            uptime = datetime.now() - self.stats['uptime_start']
+            uptime_str = f"{uptime.days}d {uptime.seconds//3600}h {(uptime.seconds//60)%60}m"
+            
             health_msg = f"""
 🤖 <b>RPD Bot Health Check</b>
 
 ✅ Status: Running
 📊 Total Assets: {len(self.trading_config)}
-⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC
+⏰ Uptime: {uptime_str}
+📈 Total Scans: {self.stats['total_scans']}
+🚨 Alerts Sent: {self.stats['alerts_sent']}
 
 📈 <b>Configuration:</b>
 {chr(10).join(config_summary)}
 
 🔄 Next check: {Config.HEALTH_CHECK_INTERVAL // 3600}h
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC
             """.strip()
             
             self.telegram.send_message(health_msg)
             self.last_health_check = datetime.now()
     
-    def signal_handler(self, signum, frame):
-        """Handle shutdown signals"""
-        logger.info(f"Received signal {signum}, shutting down gracefully...")
-        self.stop()
-    
     def start_monitoring(self):
-        """Start continuous monitoring"""
-        logger.info("🚀 Starting RPD Alert Bot Background Worker...")
-        
-        # Set up signal handlers for graceful shutdown
-        signal.signal(signal.SIGTERM, self.signal_handler)
-        signal.signal(signal.SIGINT, self.signal_handler)
+        """Start continuous monitoring in background thread"""
+        logger.info("🚀 Starting RPD Alert Bot monitoring...")
         
         # Test Telegram connection
         if not self.telegram.test_connection():
             logger.error("❌ Telegram connection failed!")
-            sys.exit(1)
-        
-        # Create configuration summary for startup message
-        config_summary = []
-        timeframe_groups = {}
-        
-        for symbol, timeframe in self.trading_config.items():
-            if timeframe not in timeframe_groups:
-                timeframe_groups[timeframe] = []
-            timeframe_groups[timeframe].append(symbol)
-        
-        for timeframe, symbols in timeframe_groups.items():
-            config_summary.append(f"• {timeframe}: {', '.join(symbols)}")
+            return False
         
         # Send startup message
         startup_msg = f"""
 🤖 <b>RPD Alert Bot Started</b>
 
 📊 <b>Multi-Timeframe Configuration:</b>
-{chr(10).join(config_summary)}
+{len(self.trading_config)} assets configured
 
 🔄 <b>Check Interval:</b> {Config.CHECK_INTERVAL}s
 🎯 <b>Min Probability:</b> {Config.MIN_PROBABILITY}%
 
-✅ Background worker is now active!
+✅ Web service is now active!
         """.strip()
         
         self.telegram.send_message(startup_msg)
@@ -634,38 +631,133 @@ class RPDAlertBot:
         
         self.running = True
         
-        try:
-            while self.running:
+        while self.running:
+            try:
                 self.run_scan()
                 self.send_health_check()
-                
-                # Wait for next scan
                 time.sleep(Config.CHECK_INTERVAL)
-                
-        except Exception as e:
-            logger.error(f"Unexpected error: {e}")
-            self.telegram.send_message(f"🤖 Bot Error: {str(e)}")
-            self.stop()
+            except Exception as e:
+                logger.error(f"Monitoring error: {e}")
+                time.sleep(60)  # Wait before retry
     
     def stop(self):
         """Stop the bot"""
         self.running = False
-        self.telegram.send_message("🤖 RPD Alert Bot Stopped")
+        if self.telegram:
+            self.telegram.send_message("🤖 RPD Alert Bot Stopped")
         logger.info("🛑 Bot stopped")
-        sys.exit(0)
 
-def main():
-    """Main entry point"""
-    try:
-        # Validate configuration and get trading config
-        trading_config = Config.validate()
+# Global bot instance
+bot = None
+
+# Flask web application
+app = Flask(__name__)
+
+@app.route('/')
+def health_check():
+    """Health check endpoint"""
+    if bot and bot.running:
+        uptime = datetime.now() - bot.stats['uptime_start']
+        uptime_str = f"{uptime.days}d {uptime.seconds//3600}h {(uptime.seconds//60)%60}m"
         
-        # Create and start bot with trading configuration
+        return jsonify({
+            'status': 'running',
+            'uptime': uptime_str,
+            'total_scans': bot.stats['total_scans'],
+            'alerts_sent': bot.stats['alerts_sent'],
+            'assets_monitored': len(bot.trading_config),
+            'last_check': datetime.now().isoformat()
+        })
+    return jsonify({'status': 'stopped'})
+
+@app.route('/status')
+def status():
+    """Detailed status endpoint"""
+    if bot and bot.running:
+        return jsonify({
+            'bot_status': 'running',
+            'configuration': bot.trading_config,
+            'stats': bot.stats,
+            'last_alerts': {k: v.isoformat() for k, v in bot.last_alerts.items()},
+            'config': {
+                'check_interval': Config.CHECK_INTERVAL,
+                'min_probability': Config.MIN_PROBABILITY,
+                'volume_filter': Config.ENABLE_VOLUME_FILTER,
+                'rsi_filter': Config.ENABLE_RSI_FILTER
+            }
+        })
+    return jsonify({'bot_status': 'stopped'})
+
+@app.route('/scan', methods=['POST'])
+def manual_scan():
+    """Manual scan endpoint"""
+    if not bot or not bot.running:
+        return jsonify({'error': 'Bot not running'}), 503
+    
+    try:
+        alerts_sent = bot.run_scan()
+        return jsonify({
+            'status': 'completed',
+            'alerts_sent': alerts_sent,
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"Manual scan error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Webhook endpoint for external triggers"""
+    try:
+        data = request.get_json()
+        symbol = data.get('symbol')
+        
+        if symbol and symbol in bot.trading_config:
+            timeframe = bot.trading_config[symbol]
+            result = bot.analyze_symbol(symbol, timeframe)
+            
+            if result:
+                return jsonify({
+                    'status': 'alert_sent',
+                    'signal': result['signal'],
+                    'probability': result['probability']
+                })
+            else:
+                return jsonify({'status': 'no_signal'})
+        
+        return jsonify({'error': 'Invalid symbol'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+def run_monitoring():
+    """Run monitoring in background thread"""
+    global bot
+    try:
+        trading_config = Config.validate()
         bot = RPDAlertBot(trading_config)
         bot.start_monitoring()
+    except Exception as e:
+        logger.error(f"Monitoring setup error: {e}")
+
+def main():
+    """Main entry point for web service"""
+    try:
+        # Start monitoring in background thread
+        monitoring_thread = threading.Thread(target=run_monitoring, daemon=True)
+        monitoring_thread.start()
+        
+        # Give the bot a moment to initialize
+        time.sleep(5)
+        
+        # Start Flask web server
+        port = Config.PORT
+        logger.info(f"Starting web service on port {port}")
+        app.run(host='0.0.0.0', port=port, debug=False)
         
     except KeyboardInterrupt:
         logger.info("Received keyboard interrupt, shutting down...")
+        if bot:
+            bot.stop()
         sys.exit(0)
     except Exception as e:
         logger.error(f"Fatal error: {e}")
