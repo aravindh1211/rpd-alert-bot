@@ -1,15 +1,15 @@
-# Use Python 3.11 slim image for better performance and smaller size
+# Use Python 3.11 slim image
 FROM python:3.11-slim
 
 # Set working directory
 WORKDIR /app
 
-# Set environment variables
+# Environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install system dependencies required for TA-Lib and other packages
+# Install system dependencies (build + TA-Lib deps + cleanup)
 RUN apt-get update && apt-get install -y \
     build-essential \
     wget \
@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     make \
+    libatlas-base-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Download and install TA-Lib C library
@@ -40,20 +41,20 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Copy the application code
+# Copy application code
 COPY . .
 
-# Create a non-root user for security
+# Create non-root user
 RUN adduser --disabled-password --gecos '' appuser && \
     chown -R appuser:appuser /app
 USER appuser
 
-# Health check to ensure the bot is running
+# Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD python -c "import sys; sys.exit(0)"
 
-# Expose port (though this is a background worker, keeping for potential web interface)
+# Expose port
 EXPOSE 8080
 
-# Set the default command to run the bot
+# Default command
 CMD ["python", "-u", "main.py"]
