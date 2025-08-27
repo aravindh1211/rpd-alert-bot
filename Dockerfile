@@ -17,9 +17,22 @@ RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
     make \
+    libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# No need to compile TA-Lib C library - using pre-built Python package
+# Download, compile and install TA-Lib C library
+RUN cd /tmp && \
+    wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
+    tar -xzf ta-lib-0.4.0-src.tar.gz && \
+    cd ta-lib/ && \
+    ./configure --prefix=/usr && \
+    make && \
+    make install && \
+    cd / && \
+    rm -rf /tmp/ta-lib*
+
+# Update library cache
+RUN ldconfig
 
 # Copy requirements first to leverage Docker cache
 COPY requirements.txt .
