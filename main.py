@@ -7,7 +7,20 @@ A cloud-based trading alert bot using RPD (Reversal Point Detection) algorithm
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import talib
+
+# Try to import talib, fallback to ta library if not available
+try:
+    import talib
+    TALIB_AVAILABLE = True
+    print("✅ Using TA-Lib for technical indicators")
+except ImportError:
+    try:
+        import ta
+        TALIB_AVAILABLE = False
+        print("⚠️  TA-Lib not available, using 'ta' library as fallback")
+    except ImportError:
+        raise ImportError("Neither talib nor ta library is available. Please install one of them.")
+
 import requests
 import time
 import json
@@ -141,6 +154,29 @@ class Config:
         logger.info(f"Monitoring {len(trading_config)} assets with timeframes: {trading_config}")
         return trading_config
 
+class TechnicalIndicators:
+    """Technical indicators wrapper with fallback support"""
+    
+    @staticmethod
+    def atr(high, low, close, timeperiod=14):
+        """Calculate Average True Range"""
+        if TALIB_AVAILABLE:
+            return talib.ATR(high, low, close, timeperiod=timeperiod)
+        else:
+            # Fallback using ta library
+            df = pd.DataFrame({'high': high, 'low': low, 'close': close})
+            return ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=timeperiod).values
+    
+    @staticmethod
+    def rsi(close, timeperiod=14):
+        """Calculate Relative Strength Index"""
+        if TALIB_AVAILABLE:
+            return talib.RSI(close, timeperiod=timeperiod)
+        else:
+            # Fallback using ta library
+            close_series = pd.Series(close)
+            return ta.momentum.rsi(close_series, window=timeperiod).values
+
 class RPDIndicator:
     """RPD Indicator - Python version of Pine Script"""
     
@@ -209,7 +245,7 @@ class RPDIndicator:
     def get_supertrend(self, df, multiplier=1.1, length=16):
         """Calculate Supertrend"""
         try:
-            atr = talib.ATR(df['High'].values, df['Low'].values, df['Close'].values, timeperiod=length)
+            atr = TechnicalIndicators.atr(df['High'].values, df['Low'].values, df['Close'].values, timeperiod=length)
             hlc3 = (df['High'] + df['Low'] + df['Close']) / 3
             
             upper = hlc3 - multiplier * atr
@@ -292,10 +328,10 @@ class RPDIndicator:
             hlc3 = (df['High'] + df['Low'] + df['Close']) / 3
             hlc3_smooth = hlc3.rolling(3).mean()
             
-            atr = talib.ATR(df['High'].values, df['Low'].values, df['Close'].values, timeperiod=14)
+            atr = TechnicalIndicators.atr(df['High'].values, df['Low'].values, df['Close'].values, timeperiod=14)
             atr_current = atr[-1] if len(atr) > 0 else 1.0
             
-            rsi = talib.RSI(df['Close'].values, timeperiod=Config.RSI_LENGTH)
+            rsi = TechnicalIndicators.rsi(df['Close'].values, timeperiod=Config.RSI_LENGTH)
             rsi_current = rsi[-1] if len(rsi) > 0 else 50.0
             
             # Volume analysis
