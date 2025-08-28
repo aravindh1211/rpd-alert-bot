@@ -15,11 +15,11 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first to leverage Docker cache
-COPY requirements-simple.txt ./requirements.txt
+COPY requirements.txt .
 
-# Install Python dependencies (no compilation needed)
+# Install Python dependencies (skip TA-Lib, install everything else)
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir yfinance==0.2.28 pandas==2.1.4 numpy==1.26.2 ta==0.10.2 requests==2.31.0 Flask==2.3.3 certifi==2023.11.17 charset-normalizer==3.3.2 idna==3.6 urllib3==2.1.0 python-dateutil==2.8.2 pytz==2023.3.post1 six==1.16.0 scipy==1.11.4
 
 # Copy application code
 COPY . .
